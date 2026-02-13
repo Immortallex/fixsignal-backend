@@ -1,3 +1,4 @@
 node_modules/
 .env
 *.log
+dummy.txt  // If you added any test files
