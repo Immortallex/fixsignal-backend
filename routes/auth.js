@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const User = require('../models/User');
+const sgMail = require('@sendgrid/mail');
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // POST /auth/signup
 router.post('/signup', async (req, res) => {
@@ -27,7 +29,7 @@ router.post('/signup', async (req, res) => {
       email,
       password: hashedPassword,
       verified: false,
-      role: 'user' // default role
+      role: 'user'
     });
 
     await user.save();
@@ -39,37 +41,28 @@ router.post('/signup', async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    // Send verification email
-    const transporter = nodemailer.createTransport({
-      service: 'Gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-      }
-    });
+    const verificationUrl = `https://fixsignal-backend.onrender.com/auth/verify/${verificationToken}`;
 
-    const verificationUrl = `http://localhost:5000/auth/verify/${verificationToken}`;
-
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
+    const msg = {
       to: email,
+      from: 'noreply@fixsignal.com',        // You can change this later
       subject: 'Verify Your FixSignal Account',
       html: `
-        <p>Hello ${name},</p>
-        <p>Thank you for signing up. Please click the link below to verify your email:</p>
-        <a href="${verificationUrl}">Verify Email</a>
+        <h2>Welcome to FixSignal, ${name}!</h2>
+        <p>Thank you for signing up.</p>
+        <p>Please click the link below to verify your email address:</p>
+        <a href="${verificationUrl}" style="background:#ffd700;color:#1a237e;padding:10px 20px;text-decoration:none;border-radius:4px;">Verify My Account</a>
         <p>This link expires in 1 hour.</p>
-        <p>If you did not sign up, ignore this email.</p>
       `
     };
 
-    await transporter.sendMail(mailOptions);
+    await sgMail.send(msg);
 
     res.status(201).json({
       msg: 'Signup successful. Please check your email to verify your account.'
     });
   } catch (err) {
-    console.error(err);
+    console.error('Signup error:', err);
     res.status(500).json({ msg: 'Server error during signup' });
   }
 });
@@ -78,72 +71,43 @@ router.post('/signup', async (req, res) => {
 router.get('/verify/:token', async (req, res) => {
   try {
     const { userId } = jwt.verify(req.params.token, process.env.JWT_SECRET);
-
-    const user = await User.findByIdAndUpdate(
-      userId,
-      { verified: true },
-      { new: true }
-    );
-
-    if (!user) {
-      return res.status(400).send('Invalid or expired verification link.');
-    }
-
+    await User.findByIdAndUpdate(userId, { verified: true });
     res.send(`
       <h2>Email Verified Successfully!</h2>
-      <p>Your account is now active.</p>
-      <p>You can now <a href="http://localhost:3000/login">log in</a> to FixSignal.</p>
+      <p>Your FixSignal account is now active.</p>
+      <p>You can now <a href="https://your-vercel-url.vercel.app/login">log in</a>.</p>
     `);
   } catch (err) {
-    console.error(err);
     res.status(400).send('Invalid or expired verification link.');
   }
 });
 
-// POST /auth/login
+// Login route (unchanged)
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ msg: 'Please provide email and password' });
+  const user = await User.findOne({ email });
+  if (!user || !user.verified) {
+    return res.status(400).json({ msg: 'Invalid credentials or not verified' });
   }
 
-  try {
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ msg: 'Invalid credentials' });
-    }
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) {
+    return res.status(400).json({ msg: 'Invalid credentials' });
+  }
 
-    if (!user.verified) {
-      return res.status(400).json({ msg: 'Please verify your email before logging in' });
-    }
+  const payload = { userId: user._id, role: user.role || 'user' };
+  const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ msg: 'Invalid credentials' });
-    }
-
-    // Create JWT payload
-    const payload = {
-      userId: user._id,
+  res.json({
+    token,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
       role: user.role || 'user'
-    };
-
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
-
-    res.json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role || 'user'
-      }
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ msg: 'Server error during login' });
-  }
+    }
+  });
 });
 
 module.exports = router;
